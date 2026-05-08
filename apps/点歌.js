@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import fetch from "node-fetch";
 import { Config, Data, Version, Plugin_Path } from '../components/index.js';
 import uploadRecord from '../model/uploadRecord.js';
+import puppeteer from "../../../lib/puppeteer/puppeteer.js";
+
 
 let toSilk
 try { toSilk = (await import('../model/toSilk.js')).default; } catch { };
@@ -199,7 +201,7 @@ export class xiaofei_music extends plugin {
 
 	/** 接受到消息都会先执行一次 */
 	accept() {
-		if (/^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐)?(\d+)?$/.test(this.e.msg)) {
+		if (/^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐|下载)?(\d+)?$/.test(this.e.msg)) {
 			music_message(this.e);
 		}
 		return;
@@ -430,7 +432,7 @@ async function update_qqmusic_ck() {
 }
 
 async function music_message(e) {
-	let reg = /^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐)?(\d+)?$/.exec(e.msg);
+	let reg = /^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐|下载)?(\d+)?$/.exec(e.msg);
 	if (reg) {
 		if (e.source && (reg[1]?.includes('语音') || reg[1]?.includes('下载音乐'))) {
 			let source;
@@ -452,12 +454,12 @@ async function music_message(e) {
 							isHigh = true
 						} catch (error) {
 							logger.error(error)
-							result = await segment.record(await toSilk(music.musicUrl) || music.musicUrl);
+							result = await segment.record(music.musicUrl || music.musicUrl);
 							isHigh = false
 						}
 						if (!isHigh) {
-							const tip = '上传[' + music.title + '-' + music.desc + ']失败！\n' + '链接：' + music.musicUrl + '\n尝试上传普通语音'
-							await e.reply(tip);
+							// const tip = '上传[' + music.title + '-' + music.desc + ']失败！\n' + '链接：' + music.musicUrl + '\n尝试上传普通语音'
+							// await e.reply(tip);
 						}
 						result = await e.reply(result);
 						if (reg[1].includes('高清') && result && isHigh) {
@@ -482,14 +484,14 @@ async function music_message(e) {
 			return false;
 		}
 
-		if ((reg[1]?.includes('语音') || reg[1]?.includes('歌词') || reg[1]?.includes('下载音乐')) && !reg[2]) {
+		if ((reg[1]?.includes('语音') || reg[1]?.includes('歌词') || reg[1]?.includes('下载音乐') || reg[1] === '下载') && !reg[2]) {
 			reg[2] = String((data.index + 1) + data.start_index);
 		}
 
 		let index = (Number(reg[2]) - 1) - data.start_index;
 
 		if (data.data.length > index && index > -1) {
-			if (data.data.length < 2 && !reg[1]?.includes('语音') && !reg[1]?.includes('歌词') && !reg[1]?.includes('下载音乐')) {
+			if (data.data.length < 2 && !reg[1]?.includes('语音') && !reg[1]?.includes('歌词') && !reg[1]?.includes('下载音乐') && reg[1] !== '下载') {
 				return false;
 			}
 			data.index = index;
@@ -497,6 +499,20 @@ async function music_message(e) {
 
 			if (!reg[1]?.includes('歌词')) {
 				let music_json = await CreateMusicShareJSON(music);
+				if (reg[1] === '下载') {
+					if (!music_json.meta.music || !music_json.meta.music?.musicUrl) {
+						await e.reply('[' + music.name + '-' + music.artist + ']获取下载地址失败！');
+						return true;
+					}
+					let musicUrl = music_json.meta.music.musicUrl;
+					let msgs = [];
+					msgs.push(`歌曲：[${music.name}-${music.artist}]`);
+					// msgs.push(`歌手：${music.artist}`);
+					// msgs.push(`来源：${music.source}`);
+					msgs.push(`flac无损下载链接(请复制到浏览器下载)：${musicUrl}`);
+					await e.reply(msgs.join('\n'));
+					return true;
+				}
 				if (reg[1] && (reg[1].includes('语音') || reg[1]?.includes('下载音乐'))) {
 					if (!music_json.meta.music || !music_json.meta.music?.musicUrl) {
 						await e.reply('[' + music.name + '-' + music.artist + ']获取下载地址失败！');
@@ -510,12 +526,12 @@ async function music_message(e) {
 						isHigh = true
 					} catch (error) {
 						logger.error(error)
-						result = await segment.record(await toSilk(music_json.meta.music.musicUrl) || music_json.meta.music.musicUrl);
+						result = await segment.record(music_json.meta.music.musicUrl || music_json.meta.music.musicUrl);
 						isHigh = false
 					}
 					if (!isHigh) {
-						const tip = '上传[' + music.name + '-' + music.artist + ']失败！\n' + '链接：' + music_json.meta.music.musicUrl + '\n尝试上传普通语音'
-						await e.reply(tip);
+						// const tip = '上传[' + music.name + '-' + music.artist + ']失败！\n' + '链接：' + music_json.meta.music.musicUrl + '\n尝试上传普通语音'
+						// await e.reply(tip);
 					}
 					result = await e.reply(result)
 					if (reg[1].includes('高清') && result && isHigh) {
@@ -785,7 +801,16 @@ async function music_handle(e, search, source, page = 0, page_size = 10, temp_da
 						if (Version.isTrss) {
 							MsgList.push({
 								...user_info,
-								message: { type: "json", data: music_json }
+								message: [{
+									type: "music", data: {
+										"type": "custom",
+										"url": music.jumpUrl,
+										"audio": music.musicUrl,
+										"title": music.title,
+										"image": music.preview,
+										"singer": music.desc
+									}
+								}]
 							});
 						} else {
 							MsgList.push({
@@ -1050,7 +1075,7 @@ async function ShareMusic_HtmlList(e, list, page, page_size, title = '') {//来�
 	};
 
 
-	let img = await xiaofei_plugin.puppeteer.screenshot("xiaofei-plugin/music_list", {
+	let img = await puppeteer.screenshot("xiaofei-plugin/music_list", {
 		saveId: saveId,
 		tplFile: `${Plugin_Path}/resources/html/music_list/index.html`,
 		data: data,
@@ -1297,10 +1322,13 @@ async function music_search(e, search, source, page = 1, page_size = 10) {
 					let songmid = [mid];
 					if (music_high_quality) {
 						let quality = [
-							['size_320mp3', 'M800', 'mp3'],
-							['size_192ogg', 'O600', 'ogg'],
-							['size_128mp3', 'M500', 'mp3'],
-							['size_96aac', 'C400', 'm4a']
+							['size_flac', 'F000', 'flac'],           // FLAC 无损 (约 800-1000kbps)
+							['size_hires', 'RS01', 'flac'],          // Hi-Res 高解析度 (24bit)
+							['size_96ogg', 'O800', 'ogg'],           // 96k OGG (如果有)
+							['size_320mp3', 'M800', 'mp3'],          // 320kbps MP3
+							['size_192ogg', 'O600', 'ogg'],          // 192kbps OGG
+							['size_128mp3', 'M500', 'mp3'],          // 128kbps MP3
+							['size_96aac', 'C400', 'm4a']            // 96kbps AAC
 						];
 						songmid = [];
 						let filename = [];
@@ -1324,6 +1352,7 @@ async function music_search(e, search, source, page = 1, page_size = 10) {
 						},
 						body: JSON.stringify(json_body)
 					};
+					logger.error(JSON.stringify(json_body))
 
 					let url = `https://u.y.qq.com/cgi-bin/musicu.fcg`;
 					try {
