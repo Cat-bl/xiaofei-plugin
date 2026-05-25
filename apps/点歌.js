@@ -1,7 +1,10 @@
 import fs from 'fs';
 import md5 from 'md5';
 import crypto from 'crypto';
+import path from 'path';
+import { execFile } from 'child_process';
 import fetch from "node-fetch";
+import sharp from "sharp";
 import { Config, Data, Version, Plugin_Path } from '../components/index.js';
 import uploadRecord from '../model/uploadRecord.js';
 import puppeteer from "../../../lib/puppeteer/puppeteer.js";
@@ -12,6 +15,13 @@ try { toSilk = (await import('../model/toSilk.js')).default; } catch { };
 const no_pic = '';
 var _page_size = 20;
 var _music_timeout = 1000 * 60 * 3;
+const music_video_dir = `data/html/xiaofei-plugin/music_video`;
+const music_video_max_duration = 7 * 60;
+const music_video_max_concurrency = 2;
+const music_video_album_size = 360;
+const music_video_album_canvas = 548;
+const music_video_album_x = 86;
+const music_video_album_y = 88;
 const music_source = {
 	'哔哩哔哩': 'bilibili',
 	'哔哩': 'bilibili',
@@ -169,11 +179,13 @@ export class xiaofei_music extends plugin {
 			} catch (err) { }
 
 			try {
-				let path = `${process.cwd()}/data/html/xiaofei-plugin/music_list`;
-				let files = fs.readdirSync(path);
-				files.forEach(file => {
-					fs.unlink(`${path}/${file}`, err => { });
-				});
+				for (let dir of ['music_list', 'music_video']) {
+					let cachePath = `${process.cwd()}/data/html/xiaofei-plugin/${dir}`;
+					let files = fs.readdirSync(cachePath);
+					files.forEach(file => {
+						fs.unlink(`${cachePath}/${file}`, err => { });
+					});
+				}
 			} catch (err) { }
 			resolve();
 		});
@@ -201,7 +213,7 @@ export class xiaofei_music extends plugin {
 
 	/** 接受到消息都会先执行一次 */
 	accept() {
-		if (/^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐|下载)?(\d+)?$/.test(this.e.msg)) {
+		if (/^#?(小飞语音|小飞高清语音|小飞歌词|小飞视频|语音|高清语音|歌词|视频|下载音乐|下载)?(\d+)?$/.test(this.e.msg)) {
 			music_message(this.e);
 		}
 		return;
@@ -355,6 +367,10 @@ if (!xiaofei_plugin.music_poke_cd) {
 	xiaofei_plugin.music_poke_cd = {};
 }
 
+if (!xiaofei_plugin.music_video_lock) {
+	xiaofei_plugin.music_video_lock = {};
+}
+
 if (xiaofei_plugin.music_guild) Bot.off('guild.message', xiaofei_plugin.music_guild);
 xiaofei_plugin.music_guild = async (e) => {//处理频道消息
 	e.msg = e.raw_message;
@@ -432,8 +448,14 @@ async function update_qqmusic_ck() {
 }
 
 async function music_message(e) {
-	let reg = /^#?(小飞语音|小飞高清语音|小飞歌词|语音|高清语音|歌词|下载音乐|下载)?(\d+)?$/.exec(e.msg);
+	let reg = /^#?(小飞语音|小飞高清语音|小飞歌词|小飞视频|语音|高清语音|歌词|视频|下载音乐|下载)?(\d+)?$/.exec(e.msg);
 	if (reg) {
+		let isVideoCommand = reg[1]?.includes('视频');
+		if (isVideoCommand && getMusicVideoRunningCount() >= music_video_max_concurrency) {
+			await e.reply(`当前已有${music_video_max_concurrency}个视频任务正在生成，本次没有开始生成，也不会自动排队。请等前面的任务完成后重新发送“视频”。`);
+			return true;
+		}
+
 		if (e.source && (reg[1]?.includes('语音') || reg[1]?.includes('下载音乐'))) {
 			let source;
 			if (e.isGroup) {
@@ -480,18 +502,26 @@ async function music_message(e) {
 
 		let key = get_MusicListId(e);
 		let data = xiaofei_plugin.music_temp_data[key];
-		if (!data || (new Date().getTime() - data.time) > _music_timeout) {
+		let now = new Date().getTime();
+		if (isVideoCommand && (!data || (now - data.time) > _music_timeout)) {
+			let shared = getSharedMusicTempData(e);
+			if (shared) {
+				key = shared.key;
+				data = shared.data;
+			}
+		}
+		if (!data || (now - data.time) > _music_timeout) {
 			return false;
 		}
 
-		if ((reg[1]?.includes('语音') || reg[1]?.includes('歌词') || reg[1]?.includes('下载音乐') || reg[1] === '下载') && !reg[2]) {
+		if ((reg[1]?.includes('语音') || reg[1]?.includes('歌词') || reg[1]?.includes('视频') || reg[1]?.includes('下载音乐') || reg[1] === '下载') && !reg[2]) {
 			reg[2] = String((data.index + 1) + data.start_index);
 		}
 
 		let index = (Number(reg[2]) - 1) - data.start_index;
 
 		if (data.data.length > index && index > -1) {
-			if (data.data.length < 2 && !reg[1]?.includes('语音') && !reg[1]?.includes('歌词') && !reg[1]?.includes('下载音乐') && reg[1] !== '下载') {
+			if (data.data.length < 2 && !reg[1]?.includes('语音') && !reg[1]?.includes('歌词') && !reg[1]?.includes('视频') && !reg[1]?.includes('下载音乐') && reg[1] !== '下载') {
 				return false;
 			}
 			data.index = index;
@@ -511,6 +541,43 @@ async function music_message(e) {
 					// msgs.push(`来源：${music.source}`);
 					msgs.push(`flac无损下载链接(请复制到浏览器下载)：${musicUrl}`);
 					await e.reply(msgs.join('\n'));
+					return true;
+				}
+				if (reg[1]?.includes('视频')) {
+					if (!music_json.meta.music || !music_json.meta.music?.musicUrl) {
+						await e.reply('[' + music.name + '-' + music.artist + ']获取播放地址失败！');
+						return true;
+					}
+
+					let tempKey = key;
+					let lockKey = getMusicVideoLockKey(tempKey, music, music_json);
+					if (xiaofei_plugin.music_video_lock[lockKey]) {
+						await e.reply('这首歌的视频正在生成，本次没有重复开始。请稍后再试！');
+						return true;
+					}
+					if (getMusicVideoRunningCount() >= music_video_max_concurrency) {
+						await e.reply(`当前已有${music_video_max_concurrency}个视频任务正在生成，本次没有开始生成，也不会自动排队。请等前面的任务完成后重新发送“视频”。`);
+						return true;
+					}
+
+					data.time = new Date().getTime();
+					xiaofei_plugin.music_video_lock[lockKey] = true;
+					let videoResult;
+					try {
+						await e.reply('开始生成视频[' + music.name + '-' + music.artist + ']。。。');
+						videoResult = await createMusicVideo(e, music, music_json);
+						await e.reply(segment.video(videoResult.outputPath));
+					} catch (err) {
+						logger.error(err);
+						await e.reply(err?.message || '视频生成失败，请稍后重试！');
+					} finally {
+						data.time = new Date().getTime();
+						xiaofei_plugin.music_temp_data[tempKey] = data;
+						delete xiaofei_plugin.music_video_lock[lockKey];
+						if (videoResult?.tempFiles) {
+							setTimeout(() => removeTempFiles(videoResult.tempFiles), 30000);
+						}
+					}
 					return true;
 				}
 				if (reg[1] && (reg[1].includes('语音') || reg[1]?.includes('下载音乐'))) {
@@ -1095,14 +1162,843 @@ async function ShareMusic_HtmlList(e, list, page, page_size, title = '') {//来�
 
 function get_MusicListId(e) {
 	let id = '';
+	let selfId = e.self_id || Bot?.uin;
 	if (e.guild_id) {
-		id = `guild_${e.channel_id}_${e.guild_id}_${e.self_id}`;
-	} else if (e.group) {
-		id = `group_${e.group?.gid || e.group.id}_${e.user_id}_${e.self_id}`;
+		id = `guild_${e.channel_id}_${e.guild_id}_${selfId}`;
+	} else if (e.isGroup || e.group || e.group_id) {
+		id = `group_${e.group?.gid || e.group?.id || e.group_id}_${e.user_id}_${selfId}`;
 	} else {
-		id = `friend_${e.user_id}_${e.self_id}`;
+		id = `friend_${e.user_id}_${selfId}`;
 	}
 	return `${id}`;
+}
+
+function getMusicVideoRunningCount() {
+	let lock = xiaofei_plugin.music_video_lock || {};
+	return Object.keys(lock).filter(key => !key.startsWith('__') && lock[key]).length;
+}
+
+function getMusicVideoLockKey(tempKey, music, musicJson) {
+	let musicInfo = musicJson?.meta?.music || {};
+	let sourceId = music?.id || music?.songmid || music?.mid || music?.rid || music?.hash || '';
+	let title = music?.name || musicInfo.title || '';
+	let artist = music?.artist || musicInfo.desc || '';
+	let audio = musicInfo.musicUrl || '';
+	let raw = [tempKey, music?.source || '', sourceId, title, artist, audio].join('|');
+	return `${tempKey}_${md5(raw)}`;
+}
+
+function getSharedMusicTempData(e) {
+	let now = new Date().getTime();
+	let selfId = e.self_id || Bot?.uin;
+	let tempData = xiaofei_plugin.music_temp_data || {};
+
+	if (e.guild_id) {
+		let key = `guild_${e.channel_id}_${e.guild_id}_${selfId}`;
+		let data = tempData[key];
+		if (data && (now - data.time) <= _music_timeout) {
+			return { key, data };
+		}
+		return null;
+	}
+
+	let groupId = e.group?.gid || e.group?.id || e.group_id;
+	if (!groupId) return null;
+
+	let prefix = `group_${groupId}_`;
+	let suffix = `_${selfId}`;
+	let result = null;
+	for (let key in tempData) {
+		if (!key.startsWith(prefix) || !key.endsWith(suffix)) continue;
+		let data = tempData[key];
+		if (!data || (now - data.time) > _music_timeout) continue;
+		if (!result || data.time > result.data.time) {
+			result = { key, data };
+		}
+	}
+	return result;
+}
+
+async function createMusicVideo(e, music, music_json) {
+	let saveId = `${Date.now()}_${random(100000, 999999)}`;
+	let tempFiles = [];
+	Data.createDir(music_video_dir, 'root');
+
+	try {
+		let basePath = path.join(process.cwd(), music_video_dir, saveId);
+		let assets = await resolveMusicVideoAssets(e, music, music_json, basePath, tempFiles);
+		let framePath = await renderMusicVideoFrame(assets, saveId);
+		let assPath = `${basePath}.ass`;
+		let outputPath = `${basePath}.mp4`;
+		let htmlPath = path.join(process.cwd(), 'temp', 'html', 'xiaofei-plugin', 'music_video', `${saveId}.html`);
+
+		tempFiles.push(framePath, assPath, htmlPath);
+		fs.writeFileSync(assPath, buildAssSubtitle(assets.lyrics), 'utf8');
+		await runFfmpegVideo(assets.audioPath, framePath, assets.albumPath, assets.needlePath, assPath, outputPath);
+		tempFiles.push(outputPath);
+
+		return { outputPath, tempFiles };
+	} catch (err) {
+		removeTempFiles(tempFiles);
+		throw err;
+	}
+}
+
+async function resolveMusicVideoAssets(e, music, music_json, basePath, tempFiles) {
+	let musicInfo = music_json?.meta?.music;
+	if (!musicInfo?.musicUrl) {
+		throw new Error('获取播放地址失败！');
+	}
+
+	let audioPath = await downloadTempFile(musicInfo.musicUrl, `${basePath}.audio`);
+	if (!audioPath) {
+		throw new Error('获取播放地址失败！');
+	}
+	tempFiles.push(audioPath);
+
+	let coverPath = '';
+	if (musicInfo.preview) {
+		try {
+			coverPath = await downloadTempFile(getHighQualityCoverUrl(musicInfo.preview), `${basePath}.cover.jpg`);
+			if (coverPath) tempFiles.push(coverPath);
+		} catch (err) {
+			logger.error(err);
+		}
+	}
+
+	let lrc = await resolveMusicLrc(music);
+	let duration = await getMediaDuration(audioPath);
+	if (duration > music_video_max_duration) {
+		throw new Error('歌曲时长超过7分钟，不能生成视频！');
+	}
+
+	return {
+		title: music.name || musicInfo.title || '',
+		artist: music.artist || musicInfo.desc || '',
+		source: music.source || '',
+		coverPath,
+		albumPath: coverPath ? await createAlbumImage(coverPath, `${basePath}.album.png`, tempFiles) : '',
+		needlePath: coverPath ? await createNeedleImage(`${basePath}.needle.png`, tempFiles) : '',
+		audioPath,
+		lyrics: parseLrc(lrc, duration, music.name || musicInfo.title || '', music.artist || musicInfo.desc || '')
+	};
+}
+
+async function resolveMusicLrc(music) {
+	try {
+		typeof (music.lrc) == 'function' ? music.lrc = await music.lrc(music.data) : music.lrc = music.lrc;
+		if (music.lrc == null && typeof (music.api) == 'function') {
+			await music.api(music.data, ['lrc'], music);
+		}
+	} catch (err) {
+		logger.error(err);
+	}
+
+	let lrc = music.lrc || '';
+	if (Array.isArray(lrc)) {
+		lrc = lrc.find(val => typeof (val) == 'string' && val.trim()) || '';
+	}
+	return typeof (lrc) == 'string' ? lrc : String(lrc || '');
+}
+
+async function renderMusicVideoFrame(assets, saveId) {
+	let framePath = path.join(process.cwd(), music_video_dir, `${saveId}.frame.jpg`);
+	let coverUrl = assets.coverPath ? fileToUrl(assets.coverPath) : '';
+	let img = await puppeteer.screenshot("xiaofei-plugin/music_video", {
+		saveId,
+		tplFile: `${Plugin_Path}/resources/html/music_video/index.html`,
+		data: {
+			plugin_path: Plugin_Path,
+			cover_url: coverUrl,
+			title: assets.title,
+			artist: assets.artist,
+			source_name: getMusicSourceName(assets.source)
+		},
+		imgType: 'jpeg',
+		quality: 92,
+		path: framePath
+	});
+
+	if (!fs.existsSync(framePath) && img) {
+		fs.writeFileSync(framePath, Buffer.from(img));
+	}
+	if (!fs.existsSync(framePath)) {
+		throw new Error('视频封面渲染失败！');
+	}
+	return framePath;
+}
+
+async function createAlbumImage(coverPath, albumPath, tempFiles) {
+	let size = music_video_album_size;
+	let canvas = music_video_album_canvas;
+	let offset = Math.round((canvas - size) / 2);
+	let mask = createCircleMask(size);
+	let discPath = await ensureDiscCacheFile(canvas, size);
+	let cover = await sharp(coverPath)
+		.resize(size, size, { fit: 'cover' })
+		.composite([{ input: mask, raw: { width: size, height: size, channels: 4 }, blend: 'dest-in' }])
+		.png()
+		.toBuffer();
+
+	await sharp(discPath)
+		.composite([{ input: cover, left: offset, top: offset }])
+		.png()
+		.toFile(albumPath);
+
+	tempFiles.push(albumPath);
+	return albumPath;
+}
+
+async function createNeedleImage(needlePath, tempFiles) {
+	let width = 720;
+	let height = 1280;
+	let cachePath = await ensureNeedleCacheFile(width, height);
+	fs.copyFileSync(cachePath, needlePath);
+	tempFiles.push(needlePath);
+	return needlePath;
+}
+
+function getMusicVideoCacheDir() {
+	let dir = path.join(process.cwd(), music_video_dir, '.cache');
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
+async function ensureDiscCacheFile(canvas, size) {
+	let cacheDir = getMusicVideoCacheDir();
+	let cachePath = path.join(cacheDir, `disc_v1_${canvas}_${size}.png`);
+	if (fs.existsSync(cachePath)) return cachePath;
+	let disc = createDiscImage(canvas, size);
+	await sharp(disc, { raw: { width: canvas, height: canvas, channels: 4 } }).png().toFile(cachePath);
+	return cachePath;
+}
+
+async function ensureNeedleCacheFile(width, height) {
+	let cacheDir = getMusicVideoCacheDir();
+	let cachePath = path.join(cacheDir, `needle_v1_${width}_${height}.png`);
+	if (fs.existsSync(cachePath)) return cachePath;
+	let image = createNeedleImageBuffer(width, height);
+	await sharp(image, { raw: { width, height, channels: 4 } }).png().toFile(cachePath);
+	return cachePath;
+}
+
+function createDiscImage(size, coverSize) {
+	let image = Buffer.alloc(size * size * 4);
+	let center = (size - 1) / 2;
+	let outer = size / 2 - 8;
+	let inner = coverSize / 2 + 8;
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			let dx = x - center;
+			let dy = y - center;
+			let distance = Math.sqrt(dx * dx + dy * dy);
+			if (distance > outer + 2) continue;
+			let offset = (y * size + x) * 4;
+			let edge = distance > outer - 2 ? (outer + 2 - distance) / 4 : 1;
+			let ratio = Math.min(1, distance / outer);
+			let angle = Math.atan2(dy, dx);
+			let groove = (Math.sin(distance * 0.32) + Math.sin(distance * 0.78)) * 4;
+			let shine = Math.max(0, 1 - Math.abs(dy + dx * 0.24 + 82) / 44) * 24;
+			let shade = Math.max(0, Math.sin(angle * 2.1 + 0.9)) * 10;
+			let base = 24 + (1 - ratio) * 44 + groove + shine + shade;
+			if (ratio > 0.76) base -= (ratio - 0.76) * 58;
+			blendPixel(image, offset, base, base + 5, base + 4, 246 * edge);
+			if (Math.abs(distance - (outer - 34)) < 1.2) blendPixel(image, offset, 255, 255, 255, 16 * edge);
+			if (Math.abs(distance - (outer - 72)) < 1.2) blendPixel(image, offset, 255, 255, 255, 13 * edge);
+			if (Math.abs(distance - (outer - 116)) < 1.5) blendPixel(image, offset, 0, 0, 0, 56 * edge);
+			if (Math.abs(distance - inner) < 3) blendPixel(image, offset, 181, 234, 215, 130 * edge);
+		}
+	}
+	return image;
+}
+
+function createNeedleImageBuffer(width, height) {
+	let image = Buffer.alloc(width * height * 4);
+	let arm = [[594, 166], [582, 246], [554, 344], [512, 428]];
+	drawPolyline(image, width, height, arm.map(([x, y]) => [x, y + 12]), 29, [0, 0, 0, 54]);
+	drawPolyline(image, width, height, arm, 17, [140, 147, 145, 255]);
+	drawPolyline(image, width, height, arm, 10, [232, 236, 234, 255]);
+	drawLine(image, width, height, 510, 421, 563, 474, 15, [140, 147, 145, 255]);
+	drawLine(image, width, height, 510, 421, 563, 474, 9, [244, 246, 244, 255]);
+	drawCircle(image, width, height, 594, 178, 50, [0, 0, 0, 42]);
+	drawCircle(image, width, height, 594, 166, 48, [238, 240, 238, 255]);
+	drawCircle(image, width, height, 594, 166, 29, [212, 216, 214, 255]);
+	drawCircle(image, width, height, 594, 166, 17, [249, 250, 248, 255]);
+	drawRotatedRect(image, width, height, 599, 118, 58, 52, 8, [204, 209, 207, 255]);
+	drawRotatedRect(image, width, height, 587, 120, 12, 72, 8, [133, 140, 138, 255]);
+	drawRotatedRect(image, width, height, 517, 421, 58, 34, 42, [242, 244, 242, 255]);
+	drawRotatedRect(image, width, height, 518, 423, 38, 18, 42, [201, 206, 204, 255]);
+	return image;
+}
+
+function drawPolyline(image, width, height, points, lineWidth, color) {
+	for (let i = 0; i < points.length - 1; i++) {
+		drawLine(image, width, height, points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], lineWidth, color);
+	}
+}
+
+function drawLine(image, width, height, x1, y1, x2, y2, lineWidth, color) {
+	let half = lineWidth / 2;
+	let minX = Math.max(0, Math.floor(Math.min(x1, x2) - half - 2));
+	let maxX = Math.min(width - 1, Math.ceil(Math.max(x1, x2) + half + 2));
+	let minY = Math.max(0, Math.floor(Math.min(y1, y2) - half - 2));
+	let maxY = Math.min(height - 1, Math.ceil(Math.max(y1, y2) + half + 2));
+	for (let y = minY; y <= maxY; y++) {
+		for (let x = minX; x <= maxX; x++) {
+			let distance = distanceToSegment(x, y, x1, y1, x2, y2);
+			if (distance > half + 1) continue;
+			let alpha = color[3] * Math.max(0, Math.min(1, half + 1 - distance));
+			blendPixel(image, (y * width + x) * 4, color[0], color[1], color[2], alpha);
+		}
+	}
+}
+
+function drawCircle(image, width, height, cx, cy, radius, color) {
+	let minX = Math.max(0, Math.floor(cx - radius - 1));
+	let maxX = Math.min(width - 1, Math.ceil(cx + radius + 1));
+	let minY = Math.max(0, Math.floor(cy - radius - 1));
+	let maxY = Math.min(height - 1, Math.ceil(cy + radius + 1));
+	for (let y = minY; y <= maxY; y++) {
+		for (let x = minX; x <= maxX; x++) {
+			let distance = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+			if (distance > radius + 1) continue;
+			let alpha = color[3] * Math.max(0, Math.min(1, radius + 1 - distance));
+			blendPixel(image, (y * width + x) * 4, color[0], color[1], color[2], alpha);
+		}
+	}
+}
+
+function drawRotatedRect(image, width, height, cx, cy, rectWidth, rectHeight, angle, color) {
+	let radian = angle * Math.PI / 180;
+	let cos = Math.cos(radian);
+	let sin = Math.sin(radian);
+	let radius = Math.sqrt(rectWidth * rectWidth + rectHeight * rectHeight) / 2 + 2;
+	let minX = Math.max(0, Math.floor(cx - radius));
+	let maxX = Math.min(width - 1, Math.ceil(cx + radius));
+	let minY = Math.max(0, Math.floor(cy - radius));
+	let maxY = Math.min(height - 1, Math.ceil(cy + radius));
+	for (let y = minY; y <= maxY; y++) {
+		for (let x = minX; x <= maxX; x++) {
+			let dx = x - cx;
+			let dy = y - cy;
+			let lx = dx * cos + dy * sin;
+			let ly = -dx * sin + dy * cos;
+			let edge = Math.max(Math.abs(lx) - rectWidth / 2, Math.abs(ly) - rectHeight / 2);
+			if (edge > 1) continue;
+			let alpha = color[3] * Math.max(0, Math.min(1, 1 - edge));
+			blendPixel(image, (y * width + x) * 4, color[0], color[1], color[2], alpha);
+		}
+	}
+}
+
+function distanceToSegment(px, py, x1, y1, x2, y2) {
+	let dx = x2 - x1;
+	let dy = y2 - y1;
+	let lengthSquare = dx * dx + dy * dy;
+	if (lengthSquare == 0) return Math.sqrt((px - x1) ** 2 + (py - y1) ** 2);
+	let t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lengthSquare));
+	let x = x1 + t * dx;
+	let y = y1 + t * dy;
+	return Math.sqrt((px - x) ** 2 + (py - y) ** 2);
+}
+
+function blendPixel(image, offset, red, green, blue, alpha) {
+	alpha = Math.max(0, Math.min(255, alpha));
+	if (alpha <= 0) return;
+	let sourceAlpha = alpha / 255;
+	let targetAlpha = image[offset + 3] / 255;
+	let outAlpha = sourceAlpha + targetAlpha * (1 - sourceAlpha);
+	image[offset] = Math.round((red * sourceAlpha + image[offset] * targetAlpha * (1 - sourceAlpha)) / outAlpha);
+	image[offset + 1] = Math.round((green * sourceAlpha + image[offset + 1] * targetAlpha * (1 - sourceAlpha)) / outAlpha);
+	image[offset + 2] = Math.round((blue * sourceAlpha + image[offset + 2] * targetAlpha * (1 - sourceAlpha)) / outAlpha);
+	image[offset + 3] = Math.round(outAlpha * 255);
+}
+
+function createCircleMask(size) {
+	let mask = Buffer.alloc(size * size * 4);
+	let center = (size - 1) / 2;
+	let radius = size / 2;
+	let radiusSquare = radius * radius;
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			let offset = (y * size + x) * 4;
+			let inside = ((x - center) ** 2 + (y - center) ** 2) <= radiusSquare;
+			mask[offset] = 255;
+			mask[offset + 1] = 255;
+			mask[offset + 2] = 255;
+			mask[offset + 3] = inside ? 255 : 0;
+		}
+	}
+	return mask;
+}
+
+async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, assPath, outputPath) {
+	let ffmpeg = Bot?.config?.ffmpeg_path || 'ffmpeg';
+	let subtitlePath = escapeFfmpegFilterPath(assPath);
+	let args = [
+		'-y',
+		'-loop', '1',
+		'-framerate', '24',
+		'-i', framePath,
+	];
+	if (coverPath) {
+		args.push('-loop', '1', '-framerate', '24', '-i', coverPath);
+	}
+	if (needlePath) {
+		args.push('-loop', '1', '-framerate', '24', '-i', needlePath);
+	}
+	let audioIndex = 1 + (coverPath ? 1 : 0) + (needlePath ? 1 : 0);
+	args.push(
+		'-i', audioPath,
+		'-filter_complex', buildMusicVideoFilter(subtitlePath, Boolean(coverPath), Boolean(needlePath)),
+		'-map', '[v]',
+		'-map', `${audioIndex}:a`,
+		'-c:v', 'libx264',
+		'-preset', 'veryfast',
+		'-crf', '30',
+		'-maxrate', '1100k',
+		'-bufsize', '2200k',
+		'-r', '24',
+		'-pix_fmt', 'yuv420p',
+		'-c:a', 'aac',
+		'-b:a', '96k',
+		'-shortest',
+		'-movflags', '+faststart',
+		outputPath
+	);
+
+	try {
+		await execFileAsync(ffmpeg, args, { timeout: 1000 * 60 * 15 });
+	} catch (err) {
+		logger.error(err?.stderr || err);
+		throw new Error('视频生成失败，请检查 ffmpeg 配置！');
+	}
+
+	if (!fs.existsSync(outputPath)) {
+		throw new Error('视频生成失败，请检查 ffmpeg 配置！');
+	}
+}
+
+function buildMusicVideoFilter(subtitlePath, hasCover, hasNeedle) {
+	let subtitleFilter = `subtitles='${subtitlePath}'`;
+	if (!hasCover) return `[0:v]scale=720:1280,setsar=1,${subtitleFilter}[v]`;
+
+	let coverMask = `format=rgba`;
+	let rotate = `rotate=2*PI*t/48:c=none:ow=iw:oh=ih`;
+	if (!hasNeedle) {
+		return `[0:v]scale=720:1280,setsar=1[bg];[1:v]${coverMask},${rotate}[disc];[bg][disc]overlay=${music_video_album_x}:${music_video_album_y}:format=auto,${subtitleFilter}[v]`;
+	}
+	return `[0:v]scale=720:1280,setsar=1[bg];[1:v]${coverMask},${rotate}[disc];[2:v]format=rgba[needle];[bg][disc]overlay=${music_video_album_x}:${music_video_album_y}:format=auto[deck];[deck][needle]overlay=0:0:format=auto,${subtitleFilter}[v]`;
+}
+
+async function downloadTempFile(file, target) {
+	if (!file || typeof (file) != 'string') return '';
+
+	if (file.startsWith('base64://')) {
+		fs.writeFileSync(target, Buffer.from(file.slice(9), 'base64'));
+		return target;
+	}
+
+	if (!/^https?:\/\//i.test(file)) {
+		let localFile = normalizeLocalFile(file);
+		if (localFile && fs.existsSync(localFile)) {
+			fs.copyFileSync(localFile, target);
+			return target;
+		}
+		return '';
+	}
+
+	let response = await fetch(file, {
+		method: 'GET',
+		headers: {
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+		}
+	});
+	if (response.status && !response.ok) return '';
+	let buffer = Buffer.from(await response.arrayBuffer());
+	if (!buffer.length) return '';
+	fs.writeFileSync(target, buffer);
+	return target;
+}
+
+function parseLrc(lrc, duration = 180, title = '', artist = '') {
+	let entries = [];
+	let lines = String(lrc || '').split(/\r?\n/);
+	for (let line of lines) {
+		let matches = [...line.matchAll(/\[(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?\]/g)];
+		if (matches.length < 1) continue;
+		let text = formatLyricText(line.replace(/\[[^\]]+\]/g, '').trim());
+		if (!text) continue;
+		for (let match of matches) {
+			entries.push({ start: parseLrcTime(match), text });
+		}
+	}
+
+	entries = entries.sort((a, b) => a.start - b.start);
+	if (entries.length > 0) {
+		return entries.map((entry, index) => {
+			let nextStart = entries[index + 1]?.start || Math.max(entry.start + 4, duration || entry.start + 4);
+			let end = Math.max(entry.start + 1.5, nextStart - 0.08);
+			if (duration > 0) end = Math.min(end, duration);
+			return { start: entry.start, end, text: entry.text };
+		}).filter(item => item.end > item.start);
+	}
+
+	let fallback = lines
+		.map(line => formatLyricText(line.replace(/\[[^\]]+\]/g, '').trim()))
+		.filter(Boolean)
+		.filter(line => !line.includes('没有查询到这首歌的歌词'));
+	if (fallback.length < 1) fallback = [title, artist].filter(Boolean);
+	if (fallback.length < 1) fallback = ['暂无歌词'];
+
+	let total = duration > 5 ? duration : fallback.length * 4;
+	let step = Math.max(2.8, total / fallback.length);
+	return fallback.map((line, index) => ({
+		start: index * step,
+		end: Math.min(total, (index + 1) * step),
+		text: line
+	})).filter(item => item.end > item.start);
+}
+
+function buildAssSubtitle(lyrics) {
+	if (!Array.isArray(lyrics) || lyrics.length < 1) {
+		lyrics = [{ start: 0, end: 5, text: '暂无歌词' }];
+	}
+
+	let events = [];
+	for (let index = 0; index < lyrics.length; index++) {
+		let item = lyrics[index];
+		if (!item || item.end <= item.start) continue;
+		let prevStart = lyrics[index - 1]?.start ?? Math.max(0, item.start - 2);
+		let nextStart = lyrics[index + 1]?.start ?? item.end;
+		let nextNextStart = lyrics[index + 2]?.start ?? Math.max(nextStart + 1.2, item.end);
+		let gapPrev = Math.max(0.16, item.start - prevStart);
+		let gapNext = Math.max(0.16, nextStart - item.start);
+		let inTrans = Math.min(0.28, gapPrev / 3);
+		let outTrans = Math.min(0.28, gapNext / 3);
+		let current = formatAssCurrentLyric(item.text);
+		let text = current.text;
+		let fontSize = current.fontSize;
+		let centerY = current.lines >= 3 ? 985 : 980;
+		let sideText = formatAssSideLyric(item.text);
+		let sideStart = Math.max(0, prevStart);
+		let sideEnd = Math.max(0, item.start - inTrans);
+		let sideInTrans = Math.min(0.28, Math.max(0.12, (sideEnd - sideStart) / 3));
+		let sideEnterEnd = Math.min(sideEnd, sideStart + sideInTrans);
+
+		addAssMoveEvent(events, sideStart, sideEnterEnd, 'Side', `{\\an5\\move(360,1150,360,1110,0,{duration})\\fs30\\alpha&HFF&\\t(0,{duration},\\alpha&H88&)}`, sideText);
+		addAssMoveEvent(events, sideEnterEnd, sideEnd, 'Side', `{\\an5\\pos(360,1110)\\fs30\\alpha&H88&}`, sideText);
+		addAssMoveEvent(events, Math.max(0, item.start - inTrans), item.start + inTrans, 'Current', `{\\an5\\move(360,1110,360,${centerY},0,{duration})\\fs30\\alpha&H88&\\t(0,{duration},\\fs${fontSize}\\alpha&H00&)}`, text);
+		addAssMoveEvent(events, item.start + inTrans, Math.max(item.start + inTrans, nextStart - outTrans), 'Current', `{\\an5\\pos(360,${centerY})\\fs${fontSize}}`, text);
+		addAssMoveEvent(events, Math.max(item.start, nextStart - outTrans), nextStart + outTrans, 'Current', `{\\an5\\move(360,${centerY},360,880,0,{duration})\\fs${fontSize}\\t(0,{duration},\\fs30\\alpha&H78&)}`, text);
+		addAssMoveEvent(events, nextStart + outTrans, nextNextStart, 'Side', `{\\an5\\pos(360,880)\\fs30\\alpha&H78&\\t({tail},{duration},\\alpha&HFF&)}`, sideText);
+	}
+
+	return `[Script Info]
+ScriptType: v4.00+
+PlayResX: 720
+PlayResY: 1280
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Current,Microsoft YaHei,46,&H00FFFFFF,&H000000FF,&H70000000,&H80000000,1,0,0,0,100,100,0,0,1,2,0,5,56,56,0,1
+Style: Side,Microsoft YaHei,34,&H66FFFFFF,&H000000FF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,1,1.5,0,5,72,72,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+${events.join('\n')}
+`;
+}
+
+async function getMediaDuration(file) {
+	try {
+		let { stdout } = await execFileAsync(Bot?.config?.ffprobe_path || 'ffprobe', [
+			'-v', 'error',
+			'-show_entries', 'format=duration',
+			'-of', 'default=noprint_wrappers=1:nokey=1',
+			file
+		]);
+		let duration = Number(String(stdout).trim());
+		if (duration > 0) return duration;
+	} catch { }
+
+	try {
+		await execFileAsync(Bot?.config?.ffmpeg_path || 'ffmpeg', ['-i', file]);
+	} catch (err) {
+		let duration = parseFfmpegDuration(err?.stderr || '');
+		if (duration > 0) return duration;
+	}
+	return 180;
+}
+
+function execFileAsync(cmd, args, options = {}) {
+	return new Promise((resolve, reject) => {
+		execFile(cmd, args, { windowsHide: true, maxBuffer: 1024 * 1024 * 10, ...options }, (error, stdout, stderr) => {
+			if (error) {
+				error.stdout = stdout;
+				error.stderr = stderr;
+				reject(error);
+				return;
+			}
+			resolve({ stdout, stderr });
+		});
+	});
+}
+
+function parseFfmpegDuration(text) {
+	let match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+	if (!match) return 0;
+	return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+function parseLrcTime(match) {
+	let ms = match[3] || '0';
+	ms = ms.padEnd(3, '0').substring(0, 3);
+	return Number(match[1]) * 60 + Number(match[2]) + Number(`0.${ms}`);
+}
+
+function formatAssTime(seconds) {
+	seconds = Math.max(0, Number(seconds) || 0);
+	let hour = Math.floor(seconds / 3600);
+	let min = Math.floor((seconds % 3600) / 60);
+	let sec = Math.floor(seconds % 60);
+	let cs = Math.floor((seconds - Math.floor(seconds)) * 100);
+	return `${hour}:${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+function addAssMoveEvent(events, startTime, endTime, style, tagTpl, text) {
+	if (endTime <= startTime || !text) return;
+	let duration = Math.max(80, Math.round((endTime - startTime) * 1000));
+	let tail = Math.max(0, duration - Math.min(180, Math.floor(duration / 2)));
+	let tags = tagTpl
+		.replace(/\{duration\}/g, duration)
+		.replace(/\{tail\}/g, tail);
+	events.push(`Dialogue: ${style == 'Current' ? 1 : 0},${formatAssTime(startTime)},${formatAssTime(endTime)},${style},,0,0,0,,${tags}${text}`);
+}
+
+function formatLyricText(text) {
+	return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function formatAssCurrentLyric(text) {
+	let value = String(text || '').replace(/\s+/g, ' ').trim();
+	if (!value) return { text: '', fontSize: 48, lines: 1 };
+	for (let fontSize of [48, 44, 40, 36]) {
+		let lines = tryWrapAssLines(value, fontSize, 3, 608);
+		if (lines) {
+			return {
+				text: lines.map(line => escapeAssText(line)).join('\\N'),
+				fontSize,
+				lines: lines.length
+			};
+		}
+	}
+	return {
+		text: formatAssLyricText(value, { fontSize: 36, preferredLines: 3, maxLines: 3, maxPixelWidth: 608 }),
+		fontSize: 36,
+		lines: 3
+	};
+}
+
+function formatAssSideLyric(text) {
+	let value = String(text || '').replace(/\s+/g, ' ').trim();
+	if (!value) return '';
+	for (let fontSize of [30, 28, 26]) {
+		let lines = tryWrapAssLines(value, fontSize, 1, 608);
+		if (lines) return lines.map(line => escapeAssText(line)).join('\\N');
+	}
+	return formatAssLyricText(value, { fontSize: 26, preferredLines: 1, maxLines: 1, maxPixelWidth: 608 });
+}
+
+function tryWrapAssLines(text, fontSize, maxLines, maxPixelWidth) {
+	let tokens = buildAssWrapTokens(text);
+	let lines = findBestAssWrap(tokens, fontSize, maxLines, maxPixelWidth);
+	if (!lines || lines.length < 1) return null;
+	for (let line of lines) {
+		if (getAssTextPixelWidth(line, fontSize) > maxPixelWidth) return null;
+	}
+	return lines;
+}
+
+function formatAssLyricText(text, options = {}) {
+	if (typeof (options) == 'number') {
+		options = {
+			fontSize: 52,
+			maxLines: arguments[2] || 2,
+			maxPixelWidth: options * 44
+		};
+	}
+
+	let fontSize = options.fontSize || 52;
+	let maxLines = options.maxLines || 2;
+	let preferredLines = options.preferredLines || Math.min(2, maxLines);
+	let maxPixelWidth = options.maxPixelWidth || 650;
+	let allowEllipsis = options.allowEllipsis !== false;
+	let value = String(text || '').replace(/\s+/g, ' ').trim();
+	if (!value) return '';
+	if (getAssTextPixelWidth(value, fontSize) <= maxPixelWidth) {
+		return escapeAssText(value);
+	}
+
+	let lines = wrapAssText(value, fontSize, preferredLines, maxLines, maxPixelWidth, allowEllipsis);
+	return lines.map(line => escapeAssText(line)).join('\\N');
+}
+
+function wrapAssText(text, fontSize, preferredLines, maxLines, maxPixelWidth, allowEllipsis = true) {
+	let tokens = buildAssWrapTokens(text);
+	let complete = findBestAssWrap(tokens, fontSize, preferredLines, maxPixelWidth);
+	if (complete) return complete;
+	complete = findBestAssWrap(tokens, fontSize, maxLines, maxPixelWidth);
+	if (complete) return complete;
+
+	let lines = [];
+	let rest = tokens.slice();
+	let limit = allowEllipsis ? maxLines : Math.max(maxLines, tokens.length);
+	for (let i = 0; i < limit && rest.length > 0; i++) {
+		if (allowEllipsis && i == maxLines - 1) {
+			lines.push(fitAssLineWithEllipsis(rest.join(''), fontSize, maxPixelWidth));
+			break;
+		}
+		let cut = getAssTokenCutIndex(rest, fontSize, maxPixelWidth);
+		lines.push(rest.splice(0, cut).join('').trim());
+	}
+	return lines.filter(Boolean);
+}
+
+function buildAssWrapTokens(text) {
+	if (/\s/.test(text)) {
+		let words = text.split(' ').filter(Boolean);
+		return words.map((word, index) => index < words.length - 1 ? `${word} ` : word);
+	}
+	return Array.from(text);
+}
+
+function findBestAssWrap(tokens, fontSize, maxLines, maxPixelWidth) {
+	let best = null;
+
+	function search(index, lines) {
+		if (index >= tokens.length) {
+			let widths = lines.map(line => getAssTextPixelWidth(line, fontSize));
+			let underfill = widths.reduce((sum, width) => sum + Math.pow(maxPixelWidth - width, 2), 0);
+			let lineCost = lines.length * maxPixelWidth * maxPixelWidth;
+			let score = underfill + lineCost;
+			if (!best || score < best.score) best = { lines, score };
+			return;
+		}
+		if (lines.length >= maxLines) return;
+
+		let line = '';
+		for (let i = index; i < tokens.length; i++) {
+			line += tokens[i];
+			let trimmed = line.trim();
+			if (getAssTextPixelWidth(trimmed, fontSize) > maxPixelWidth) break;
+			search(i + 1, lines.concat(trimmed));
+		}
+	}
+
+	search(0, []);
+	return best?.lines || null;
+}
+
+function getAssTokenCutIndex(tokens, fontSize, maxPixelWidth) {
+	let line = '';
+	let cut = 0;
+	for (let i = 0; i < tokens.length; i++) {
+		let next = line + tokens[i];
+		if (getAssTextPixelWidth(next.trim(), fontSize) > maxPixelWidth) break;
+		line = next;
+		cut = i + 1;
+	}
+	return Math.max(1, cut);
+}
+
+function fitAssLineWithEllipsis(text, fontSize, maxPixelWidth) {
+	let chars = Array.from(String(text || '').trim());
+	let ellipsis = '...';
+	while (chars.length > 0 && getAssTextPixelWidth(`${chars.join('').trim()}${ellipsis}`, fontSize) > maxPixelWidth) {
+		chars.pop();
+	}
+	return `${chars.join('').trim()}${ellipsis}`;
+}
+
+function getAssTextPixelWidth(text, fontSize) {
+	return Array.from(String(text || '')).reduce((sum, char) => sum + getAssCharPixelWidth(char, fontSize), 0);
+}
+
+function getAssCharPixelWidth(char, fontSize) {
+	if (/\s/.test(char)) return fontSize * 0.28;
+	if (/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE6F\uFF00-\uFF60]/.test(char)) return fontSize;
+	if (/[ilI1'`.,:;!|]/.test(char)) return fontSize * 0.22;
+	if (/[mwMW@#%&]/.test(char)) return fontSize * 0.66;
+	if (/[A-Z]/.test(char)) return fontSize * 0.55;
+	if (/[0-9]/.test(char)) return fontSize * 0.5;
+	return fontSize * 0.42;
+}
+
+function escapeAssText(text) {
+	return String(text || '')
+		.replace(/\\/g, '\\\\')
+		.replace(/\{/g, '\\{')
+		.replace(/\}/g, '\\}')
+		.replace(/\r?\n/g, '\\N');
+}
+
+function escapeFfmpegFilterPath(file) {
+	return path.resolve(file).replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+}
+
+function normalizeLocalFile(file) {
+	file = String(file || '').replace(/^file:\/{2}/, '');
+	if (process.platform == 'win32' && /^\/[a-zA-Z]:\//.test(file)) file = file.slice(1);
+	return file.replace(/\//g, path.sep);
+}
+
+function getHighQualityCoverUrl(url) {
+	url = String(url || '');
+	if (!url) return url;
+
+	if (url.includes('y.gtimg.cn/music/photo_new/')) {
+		url = url.replace(/R\d+x\d+M000/, 'R800x800M000');
+	}
+	if (url.includes('music.163.com')) {
+		url = url.replace(/\?param=\d+[xy]\d+/, '?param=800y800');
+		if (!url.includes('?param=')) url += '?param=800y800';
+	}
+	if (url.includes('kugou.com')) {
+		url = url.replace(/\{size\}/g, '800');
+	}
+	if (url.includes('kuwo.cn')) {
+		url = url.replace(/\/\d+\//, '/800/');
+	}
+	return url;
+}
+
+function fileToUrl(file) {
+	let value = path.resolve(file).replace(/\\/g, '/');
+	if (!value.startsWith('/')) value = `/${value}`;
+	return `file://${value}`;
+}
+
+function getMusicSourceName(source) {
+	let names = {
+		netease: '网易云音乐',
+		qq: 'QQ音乐',
+		kuwo: '酷我音乐',
+		kugou: '酷狗音乐',
+		bilibili: '哔哩哔哩'
+	};
+	return names[source] || '音乐';
+}
+
+function removeTempFiles(files = []) {
+	let root = path.resolve(process.cwd()).toLowerCase();
+	for (let file of [...new Set(files)]) {
+		if (!file) continue;
+		let full = path.resolve(file);
+		if (!full.toLowerCase().startsWith(root)) continue;
+		fs.unlink(full, err => { });
+	}
 }
 
 async function get_background() {
