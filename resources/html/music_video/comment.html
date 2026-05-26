@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" type="text/css" href="{{data.plugin_path}}/resources/html/music_video/comment.css" />
+</head>
+<body>
+<div id="container">
+  <% if (data.cover_url) { %>
+  <div class="backdrop" style="background-image: url('<%= data.cover_url %>')"></div>
+  <% } %>
+  <div class="overlay"></div>
+  <div class="stage">
+    <header class="header">
+      <span class="dot"></span>
+      <span class="title">热评</span>
+      <% if (data.total_count) { %>
+      <span class="count"><%= data.total_count %></span>
+      <% } %>
+      <span class="subtitle">{{data.source_name}}</span>
+    </header>
+    <ul class="comments">
+      <% data.comments.forEach(function(item) { %>
+      <li class="comment">
+        <% if (item.avatarUrl) { %>
+        <div class="avatar" style="background-image: url('<%= item.avatarUrl %>')"></div>
+        <% } else { %>
+        <div class="avatar default"></div>
+        <% } %>
+        <div class="body">
+          <div class="nick"><%= item.nickname %></div>
+          <div class="content"><%= item.content %></div>
+          <% if (item.likeText) { %>
+          <div class="like">♡ <%= item.likeText %></div>
+          <% } %>
+        </div>
+      </li>
+      <% }); %>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

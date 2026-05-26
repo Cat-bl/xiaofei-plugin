@@ -1228,13 +1228,16 @@ async function createMusicVideo(e, music, music_json) {
 		let basePath = path.join(process.cwd(), music_video_dir, saveId);
 		let assets = await resolveMusicVideoAssets(e, music, music_json, basePath, tempFiles);
 		let framePath = await renderMusicVideoFrame(assets, saveId);
+		let commentPath = await renderMusicCommentImage(assets, saveId);
 		let assPath = `${basePath}.ass`;
 		let outputPath = `${basePath}.mp4`;
 		let htmlPath = path.join(process.cwd(), 'temp', 'html', 'xiaofei-plugin', 'music_video', `${saveId}.html`);
 
 		tempFiles.push(framePath, assPath, htmlPath);
-		fs.writeFileSync(assPath, buildAssSubtitle(assets.lyrics), 'utf8');
-		await runFfmpegVideo(assets.audioPath, framePath, assets.albumPath, assets.needlePath, assPath, outputPath);
+		if (commentPath) tempFiles.push(commentPath);
+		let audioDelay = (assets.albumPath && assets.needlePath) ? 2.2 : 0;
+		fs.writeFileSync(assPath, buildAssSubtitle(assets.lyrics, audioDelay), 'utf8');
+		await runFfmpegVideo(assets.audioPath, framePath, assets.albumPath, assets.needlePath, commentPath, assPath, outputPath, assets.duration);
 		tempFiles.push(outputPath);
 
 		return { outputPath, tempFiles };
@@ -1271,6 +1274,7 @@ async function resolveMusicVideoAssets(e, music, music_json, basePath, tempFiles
 	if (duration > music_video_max_duration) {
 		throw new Error('歌曲时长超过7分钟，不能生成视频！');
 	}
+	let commentResult = await fetchMusicComments(music);
 
 	return {
 		title: music.name || musicInfo.title || '',
@@ -1280,6 +1284,9 @@ async function resolveMusicVideoAssets(e, music, music_json, basePath, tempFiles
 		albumPath: coverPath ? await createAlbumImage(coverPath, `${basePath}.album.png`, tempFiles) : '',
 		needlePath: coverPath ? await createNeedleImage(`${basePath}.needle.png`, tempFiles) : '',
 		audioPath,
+		duration,
+		comments: commentResult.list || [],
+		commentTotal: commentResult.total || 0,
 		lyrics: parseLrc(lrc, duration, music.name || musicInfo.title || '', music.artist || musicInfo.desc || '')
 	};
 }
@@ -1326,6 +1333,50 @@ async function renderMusicVideoFrame(assets, saveId) {
 		throw new Error('视频封面渲染失败！');
 	}
 	return framePath;
+}
+
+async function renderMusicCommentImage(assets, saveId) {
+	if (!Array.isArray(assets.comments) || assets.comments.length < 1) return '';
+	let imagePath = path.join(process.cwd(), music_video_dir, `${saveId}.comment.png`);
+	try {
+		let comments = assets.comments.map(c => ({
+			nickname: c.nickname,
+			content: c.content,
+			avatarUrl: c.avatarUrl,
+			likeText: formatLikeCount(c.likedCount)
+		}));
+		let coverUrl = assets.coverPath ? fileToUrl(assets.coverPath) : '';
+		let totalCount = formatLikeCount(assets.commentTotal);
+		let img = await puppeteer.screenshot('xiaofei-plugin/music_video', {
+			saveId: `${saveId}_comment`,
+			tplFile: `${Plugin_Path}/resources/html/music_video/comment.html`,
+			data: {
+				plugin_path: Plugin_Path,
+				source_name: getMusicSourceName(assets.source),
+				cover_url: coverUrl,
+				total_count: totalCount,
+				comments
+			},
+			imgType: 'png',
+			path: imagePath
+		});
+		if (!fs.existsSync(imagePath) && img) {
+			fs.writeFileSync(imagePath, Buffer.from(img));
+		}
+		return fs.existsSync(imagePath) ? imagePath : '';
+	} catch (err) {
+		logger.error('[点歌评论] 渲染失败', err);
+		return '';
+	}
+}
+
+function formatLikeCount(n) {
+	let num = Number(n) || 0;
+	if (num < 1) return '';
+	if (num >= 100000) return `${Math.floor(num / 10000)}w`;
+	if (num >= 10000) return `${(num / 10000).toFixed(1)}w`;
+	if (num >= 1000) return `${(num / 1000).toFixed(1)}k`;
+	return String(num);
 }
 
 async function createAlbumImage(coverPath, albumPath, tempFiles) {
@@ -1532,7 +1583,7 @@ function createCircleMask(size) {
 	return mask;
 }
 
-async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, assPath, outputPath) {
+async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, commentPath, assPath, outputPath, duration) {
 	let ffmpeg = Bot?.config?.ffmpeg_path || 'ffmpeg';
 	let subtitlePath = escapeFfmpegFilterPath(assPath);
 	let args = [
@@ -1547,12 +1598,18 @@ async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, assPa
 	if (needlePath) {
 		args.push('-loop', '1', '-framerate', '24', '-i', needlePath);
 	}
-	let audioIndex = 1 + (coverPath ? 1 : 0) + (needlePath ? 1 : 0);
+	if (commentPath) {
+		args.push('-loop', '1', '-framerate', '24', '-i', commentPath);
+	}
+	let commentIndex = 1 + (coverPath ? 1 : 0) + (needlePath ? 1 : 0);
+	let audioIndex = commentIndex + (commentPath ? 1 : 0);
+	let audioDelay = (coverPath && needlePath) ? 2.2 : 0;
+	let totalDuration = (duration || 180) + audioDelay;
 	args.push(
 		'-i', audioPath,
-		'-filter_complex', buildMusicVideoFilter(subtitlePath, Boolean(coverPath), Boolean(needlePath)),
+		'-filter_complex', buildMusicVideoFilter(subtitlePath, Boolean(coverPath), Boolean(needlePath), Boolean(commentPath), commentIndex, audioIndex, audioDelay, duration),
 		'-map', '[v]',
-		'-map', `${audioIndex}:a`,
+		'-map', '[aout]',
 		'-c:v', 'libx264',
 		'-preset', 'veryfast',
 		'-crf', '30',
@@ -1562,7 +1619,7 @@ async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, assPa
 		'-pix_fmt', 'yuv420p',
 		'-c:a', 'aac',
 		'-b:a', '96k',
-		'-shortest',
+		'-t', String(totalDuration),
 		'-movflags', '+faststart',
 		outputPath
 	);
@@ -1579,16 +1636,55 @@ async function runFfmpegVideo(audioPath, framePath, coverPath, needlePath, assPa
 	}
 }
 
-function buildMusicVideoFilter(subtitlePath, hasCover, hasNeedle) {
+function buildMusicVideoFilter(subtitlePath, hasCover, hasNeedle, hasComment, commentIndex, audioIndex, audioDelay, duration) {
 	let subtitleFilter = `subtitles='${subtitlePath}'`;
-	if (!hasCover) return `[0:v]scale=720:1280,setsar=1,${subtitleFilter}[v]`;
+	let chain = `[0:v]scale=720:1280,setsar=1[bg]`;
+	let baseLabel = 'bg';
+	let discDur = 1.2;
+	let needleRotateStart = discDur;
+	let needleRotateDur = 1.0;
+	let needleRotateEnd = needleRotateStart + needleRotateDur;
 
-	let coverMask = `format=rgba`;
-	let rotate = `rotate=2*PI*t/48:c=none:ow=iw:oh=ih`;
-	if (!hasNeedle) {
-		return `[0:v]scale=720:1280,setsar=1[bg];[1:v]${coverMask},${rotate}[disc];[bg][disc]overlay=${music_video_album_x}:${music_video_album_y}:format=auto,${subtitleFilter}[v]`;
+	if (hasCover) {
+		let coverMask = `format=rgba`;
+		let rotateFrame = Math.ceil(needleRotateEnd * 24);
+		let rotate = `rotate='if(lt(n,${rotateFrame}),0,2*PI*(n-${rotateFrame})/${24 * 48})':c=none:ow=iw:oh=ih`;
+		let discFade = `fade=in:st=0:d=${discDur}:alpha=1`;
+		let discY = `if(lt(t,${discDur}),${music_video_album_y}-60*(1-t/${discDur}),${music_video_album_y})`;
+		chain += `;[1:v]${coverMask},${rotate},${discFade}[disc];[bg][disc]overlay=${music_video_album_x}:y='${discY}':format=auto[deck]`;
+		baseLabel = 'deck';
+		if (hasNeedle) {
+			let needleFade = `fade=in:st=0:d=${discDur}:alpha=1`;
+			let nStart = Math.ceil(needleRotateStart * 24);
+			let nEnd = Math.ceil(needleRotateEnd * 24);
+			let needleRotate = `pad=1188:2228:0:948:color=0x00000000,rotate='if(lt(n,${nStart}),-0.26,if(lt(n,${nEnd}),-0.26*(${nEnd}-n)/${nEnd - nStart},0))':c=0x00000000:ow=1188:oh=2228,crop=720:1280:0:948`;
+			chain += `;[2:v]format=rgba,${needleRotate},${needleFade}[needle];[deck][needle]overlay=0:0:format=auto[deck2]`;
+			baseLabel = 'deck2';
+		}
 	}
-	return `[0:v]scale=720:1280,setsar=1[bg];[1:v]${coverMask},${rotate}[disc];[2:v]format=rgba[needle];[bg][disc]overlay=${music_video_album_x}:${music_video_album_y}:format=auto[deck];[deck][needle]overlay=0:0:format=auto,${subtitleFilter}[v]`;
+
+	chain += `;[${baseLabel}]${subtitleFilter}[withsub]`;
+	baseLabel = 'withsub';
+
+	if (hasComment) {
+		let cIn = audioDelay + 1;
+		let cInEnd = cIn + 0.6;
+		let cOut = cIn + 8;
+		let cOutEnd = cOut + 0.6;
+		let commentChain = `[${commentIndex}:v]format=rgba,fade=in:st=${cIn}:d=0.6:alpha=1,fade=out:st=${cOut}:d=0.6:alpha=1[comment]`;
+		let commentX = `if(lt(t,${cIn}),720,if(lt(t,${cInEnd}),720-400*(t-${cIn})/0.6,if(lt(t,${cOut}),320,if(lt(t,${cOutEnd}),320+400*(t-${cOut})/0.6,720))))`;
+		chain += `;${commentChain};[${baseLabel}][comment]overlay=x='${commentX}':y=0:enable='lt(t,${cOutEnd})':format=auto[withcomment]`;
+		baseLabel = 'withcomment';
+	}
+
+	let delayMs = Math.round(audioDelay * 1000);
+	if (delayMs > 0) {
+		chain += `;[${audioIndex}:a]adelay=${delayMs}|${delayMs}[aout]`;
+	} else {
+		chain += `;[${audioIndex}:a]anull[aout]`;
+	}
+
+	return `${chain};[${baseLabel}]null[v]`;
 }
 
 async function downloadTempFile(file, target) {
@@ -1627,10 +1723,12 @@ function parseLrc(lrc, duration = 180, title = '', artist = '') {
 	for (let line of lines) {
 		let matches = [...line.matchAll(/\[(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?\]/g)];
 		if (matches.length < 1) continue;
-		let text = formatLyricText(line.replace(/\[[^\]]+\]/g, '').trim());
+		let rawBody = line.replace(/\[[^\]]+\]/g, '');
+		let words = parseInlineLrcWords(rawBody);
+		let text = formatLyricText(rawBody.replace(/<\d{1,3}:\d{1,2}(?:\.\d{1,3})?>/g, ''));
 		if (!text) continue;
 		for (let match of matches) {
-			entries.push({ start: parseLrcTime(match), text });
+			entries.push({ start: parseLrcTime(match), text, words });
 		}
 	}
 
@@ -1640,7 +1738,7 @@ function parseLrc(lrc, duration = 180, title = '', artist = '') {
 			let nextStart = entries[index + 1]?.start || Math.max(entry.start + 4, duration || entry.start + 4);
 			let end = Math.max(entry.start + 1.5, nextStart - 0.08);
 			if (duration > 0) end = Math.min(end, duration);
-			return { start: entry.start, end, text: entry.text };
+			return { start: entry.start, end, text: entry.text, words: entry.words };
 		}).filter(item => item.end > item.start);
 	}
 
@@ -1660,9 +1758,17 @@ function parseLrc(lrc, duration = 180, title = '', artist = '') {
 	})).filter(item => item.end > item.start);
 }
 
-function buildAssSubtitle(lyrics) {
+function buildAssSubtitle(lyrics, timeOffset = 0) {
 	if (!Array.isArray(lyrics) || lyrics.length < 1) {
 		lyrics = [{ start: 0, end: 5, text: '暂无歌词' }];
+	}
+
+	if (timeOffset > 0) {
+		lyrics = lyrics.map(item => ({
+			...item,
+			start: item.start + timeOffset,
+			end: item.end + timeOffset
+		}));
 	}
 
 	let events = [];
@@ -1685,11 +1791,14 @@ function buildAssSubtitle(lyrics) {
 		let sideEnd = Math.max(0, item.start - inTrans);
 		let sideInTrans = Math.min(0.28, Math.max(0.12, (sideEnd - sideStart) / 3));
 		let sideEnterEnd = Math.min(sideEnd, sideStart + sideInTrans);
+		let stableStart = item.start + inTrans;
+		let stableEnd = Math.max(stableStart, nextStart - outTrans);
+		let karaokeText = buildKaraokeAssText(text, item.words, stableEnd - stableStart);
 
 		addAssMoveEvent(events, sideStart, sideEnterEnd, 'Side', `{\\an5\\move(360,1150,360,1110,0,{duration})\\fs30\\alpha&HFF&\\t(0,{duration},\\alpha&H88&)}`, sideText);
 		addAssMoveEvent(events, sideEnterEnd, sideEnd, 'Side', `{\\an5\\pos(360,1110)\\fs30\\alpha&H88&}`, sideText);
-		addAssMoveEvent(events, Math.max(0, item.start - inTrans), item.start + inTrans, 'Current', `{\\an5\\move(360,1110,360,${centerY},0,{duration})\\fs30\\alpha&H88&\\t(0,{duration},\\fs${fontSize}\\alpha&H00&)}`, text);
-		addAssMoveEvent(events, item.start + inTrans, Math.max(item.start + inTrans, nextStart - outTrans), 'Current', `{\\an5\\pos(360,${centerY})\\fs${fontSize}}`, text);
+		addAssMoveEvent(events, Math.max(0, item.start - inTrans), item.start + inTrans, 'Current', `{\\an5\\move(360,1110,360,${centerY},0,{duration})\\fs30\\alpha&H88&\\t(0,{duration},\\fs${fontSize}\\alpha&H80&)}`, text);
+		addAssMoveEvent(events, stableStart, stableEnd, 'Current', `{\\an5\\pos(360,${centerY})\\fs${fontSize}}`, karaokeText);
 		addAssMoveEvent(events, Math.max(item.start, nextStart - outTrans), nextStart + outTrans, 'Current', `{\\an5\\move(360,${centerY},360,880,0,{duration})\\fs${fontSize}\\t(0,{duration},\\fs30\\alpha&H78&)}`, text);
 		addAssMoveEvent(events, nextStart + outTrans, nextNextStart, 'Side', `{\\an5\\pos(360,880)\\fs30\\alpha&H78&\\t({tail},{duration},\\alpha&HFF&)}`, sideText);
 	}
@@ -1702,13 +1811,117 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Current,Microsoft YaHei,46,&H00FFFFFF,&H000000FF,&H70000000,&H80000000,1,0,0,0,100,100,0,0,1,2,0,5,56,56,0,1
+Style: Current,Microsoft YaHei,46,&H00FFFFFF,&H80FFFFFF,&H70000000,&H80000000,1,0,0,0,100,100,0,0,1,2,0,5,56,56,0,1
 Style: Side,Microsoft YaHei,34,&H66FFFFFF,&H000000FF,&H90000000,&H90000000,0,0,0,0,100,100,0,0,1,1.5,0,5,72,72,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 ${events.join('\n')}
 `;
+}
+
+async function fetchMusicComments(music) {
+	if (!music || !music.data) return { list: [], total: 0 };
+	try {
+		if (music.source == 'netease') return await fetchNeteaseComments(music.data.id);
+		if (music.source == 'qq') return await fetchQQComments(music.data.mid);
+	} catch (err) {
+		logger.error('[点歌评论] 获取失败', err);
+	}
+	return { list: [], total: 0 };
+}
+
+async function fetchNeteaseComments(songId) {
+	if (!songId) return { list: [], total: 0 };
+	let response = await fetch(`https://music.163.com/api/v1/resource/comments/R_SO_4_${songId}?limit=10&offset=0`, {
+		method: 'GET',
+		headers: {
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+			'Cookie': music_cookies.netease?.ck || ''
+		}
+	});
+	if (!response.ok) return { list: [], total: 0 };
+	let res = await response.json();
+	if (res.code != 200) return { list: [], total: 0 };
+	let total = Number(res.total) || 0;
+	let list = Array.isArray(res.hotComments) && res.hotComments.length > 0
+		? res.hotComments
+		: (Array.isArray(res.comments) ? res.comments : []);
+	let items = list.slice(0, 8).map(c => ({
+		nickname: c.user?.nickname || '匿名用户',
+		avatarUrl: c.user?.avatarUrl || '',
+		content: String(c.content || '').replace(/\[em\][^\[]*\[\/em\]/g, '').replace(/\s+/g, ' ').trim(),
+		likedCount: Number(c.likedCount) || 0
+	})).filter(c => c.content);
+	return { list: items, total };
+}
+
+async function fetchQQComments(songmid) {
+	if (!songmid) return { list: [], total: 0 };
+	let songIdRes = await fetch('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			...JSON.parse(JSON.stringify(music_cookies.qqmusic.body)),
+			req_0: {
+				module: 'music.pf_song_detail_svr',
+				method: 'get_song_detail_yqq',
+				param: { song_mid: songmid }
+			}
+		})
+	});
+	if (!songIdRes.ok) return { list: [], total: 0 };
+	let songIdJson = await songIdRes.json();
+	let songid = songIdJson?.req_0?.data?.track_info?.id;
+	if (!songid) return { list: [], total: 0 };
+
+	let commentRes = await fetch(`https://c.y.qq.com/base/fcgi-bin/fcg_global_comment_h5.fcg?cid=205360772&reqtype=2&biztype=1&topid=${songid}&cmd=8&needmusiccrit=0&pagenum=0&pagesize=15&domain=qq.com&ct=24&cv=10101010`, {
+		method: 'GET',
+		headers: {
+			'Referer': 'https://y.qq.com/',
+			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+		}
+	});
+	if (!commentRes.ok) return { list: [], total: 0 };
+	let commentJson = await commentRes.json();
+	if (commentJson.code != 0) return { list: [], total: 0 };
+	let total = Number(commentJson.comment?.commenttotal) || 0;
+	let list = commentJson.hot_comment?.commentlist || [];
+
+	let nickCount = {};
+	for (let c of list) nickCount[c.nick] = (nickCount[c.nick] || 0) + 1;
+	let topNick = Object.entries(nickCount).sort((a, b) => b[1] - a[1])[0];
+	let isArtistFlood = topNick && topNick[1] > list.length / 2;
+
+	let items = list.map(c => {
+		let nickname, content, avatarUrl;
+		if (isArtistFlood && c.nick === topNick[0]) {
+			let rn = (c.rootcommentnick || '').replace(/^@/, '');
+			if (!rn || rn === topNick[0]) return null;
+			nickname = rn;
+			content = c.rootcommentcontent || c.content || '';
+			avatarUrl = '';
+		} else {
+			nickname = c.nick || '匿名用户';
+			content = c.rootcommentcontent || c.content || '';
+			avatarUrl = c.avatarurl ? (/^https?:/.test(c.avatarurl) ? c.avatarurl : `http:${c.avatarurl}`) : '';
+		}
+		return {
+			nickname,
+			avatarUrl,
+			content: String(content).replace(/\[em\][^\[]*\[\/em\]/g, '').replace(/\s+/g, ' ').trim(),
+			likedCount: Number(c.praisenum) || 0
+		};
+	}).filter(c => c && c.content && !c.content.includes('@元宝') && c.nickname !== 'Q音辅导员' && c.nickname !== '元宝');
+	let seen = new Set();
+	let result = [];
+	for (let c of items) {
+		if (seen.has(c.nickname)) continue;
+		seen.add(c.nickname);
+		result.push(c);
+		if (result.length >= 8) break;
+	}
+	return { list: result, total };
 }
 
 async function getMediaDuration(file) {
@@ -1758,6 +1971,23 @@ function parseLrcTime(match) {
 	return Number(match[1]) * 60 + Number(match[2]) + Number(`0.${ms}`);
 }
 
+function parseInlineLrcWords(text) {
+	let inline = [...String(text || '').matchAll(/<(\d{1,3}):(\d{1,2})(?:\.(\d{1,3}))?>([^<]*)/g)];
+	if (inline.length < 1) return null;
+	let words = [];
+	for (let i = 0; i < inline.length; i++) {
+		let cur = inline[i];
+		let next = inline[i + 1];
+		let curTime = parseLrcTime(cur);
+		let nextTime = next ? parseLrcTime(next) : curTime + 0.4;
+		let span = Math.max(0.01, nextTime - curTime);
+		let char = String(cur[4] || '').replace(/\s+/g, ' ');
+		if (!char) continue;
+		words.push({ cs: Math.max(1, Math.round(span * 100)), char });
+	}
+	return words.length > 0 ? words : null;
+}
+
 function formatAssTime(seconds) {
 	seconds = Math.max(0, Number(seconds) || 0);
 	let hour = Math.floor(seconds / 3600);
@@ -1779,6 +2009,55 @@ function addAssMoveEvent(events, startTime, endTime, style, tagTpl, text) {
 
 function formatLyricText(text) {
 	return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function buildKaraokeAssText(displayText, words, durationSec) {
+	let tokens = splitEscapedAssTokens(displayText);
+	let charCount = tokens.filter(t => t != '\\N').length;
+	if (charCount < 1) return displayText;
+	let totalCs = Math.max(1, Math.round(Number(durationSec) * 100));
+
+	let perCs;
+	if (Array.isArray(words) && words.length > 0) {
+		let sum = words.reduce((s, w) => s + (Number(w.cs) || 0), 0);
+		let scale = sum > 0 ? totalCs / sum : 1;
+		perCs = i => {
+			let w = words[i] || words[words.length - 1];
+			return Math.max(1, Math.round((Number(w?.cs) || 1) * scale));
+		};
+	} else {
+		let per = Math.max(1, Math.floor(totalCs / charCount));
+		perCs = () => per;
+	}
+
+	let result = '';
+	let ci = 0;
+	for (let t of tokens) {
+		if (t == '\\N') {
+			result += t;
+			continue;
+		}
+		result += `{\\kf${perCs(ci)}}${t}`;
+		ci++;
+	}
+	return result;
+}
+
+function splitEscapedAssTokens(text) {
+	let tokens = [];
+	let s = String(text || '');
+	for (let i = 0; i < s.length;) {
+		if (s[i] == '\\' && i + 1 < s.length) {
+			tokens.push(s.substr(i, 2));
+			i += 2;
+			continue;
+		}
+		let code = s.codePointAt(i);
+		let ch = String.fromCodePoint(code);
+		tokens.push(ch);
+		i += ch.length;
+	}
+	return tokens;
 }
 
 function formatAssCurrentLyric(text) {

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  width: 720px;
+  height: 1280px;
+  overflow: hidden;
+  font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  background: #101114;
+}
+.page {
+  position: relative;
+  width: 720px;
+  height: 1280px;
+  background:
+    radial-gradient(circle at 50% 10%, rgba(255,255,255,0.16), transparent 38%),
+    linear-gradient(180deg, #272a30 0%, #101114 50%, #0b0c0f 100%);
+}
+.fake-cover {
+  position: absolute;
+  top: 88px;
+  left: 86px;
+  width: 548px;
+  height: 548px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #2a2a34 0%, #181820 70%);
+  border: 2px solid rgba(255,255,255,0.1);
+}
+.fake-title {
+  position: absolute;
+  top: 680px;
+  left: 0;
+  width: 720px;
+  text-align: center;
+  color: #fff;
+  font-size: 42px;
+  font-weight: 700;
+}
+.fake-artist {
+  position: absolute;
+  top: 740px;
+  left: 0;
+  width: 720px;
+  text-align: center;
+  color: rgba(255,255,255,0.7);
+  font-size: 28px;
+}
+.fake-lyric {
+  position: absolute;
+  top: 940px;
+  left: 0;
+  width: 720px;
+  text-align: center;
+  color: #fff;
+  font-size: 46px;
+  font-weight: 700;
+  text-shadow: 0 4px 18px rgba(0,0,0,0.5);
+}
+.fake-lyric-side {
+  position: absolute;
+  top: 1080px;
+  left: 0;
+  width: 720px;
+  text-align: center;
+  color: rgba(255,255,255,0.5);
+  font-size: 30px;
+}
+
+.comment-panel {
+  position: absolute;
+  top: 0;
+  left: 320px;
+  width: 400px;
+  height: 1280px;
+  overflow: hidden;
+  border-left: 1px solid rgba(255,255,255,0.08);
+}
+.comment-backdrop {
+  position: absolute;
+  inset: -40px;
+  background: radial-gradient(circle at 50% 30%, #3a2a44, #1a1a24);
+  filter: blur(30px) brightness(0.4) saturate(1.2);
+  transform: scale(1.1);
+}
+.comment-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(8,8,12,0.7) 0%, rgba(8,8,12,0.82) 50%, rgba(8,8,12,0.7) 100%);
+}
+.comment-stage {
+  position: relative;
+  width: 400px;
+  height: 1280px;
+  padding: 72px 22px 60px 26px;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  margin-bottom: 24px;
+  padding-left: 4px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 12px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 0 12px rgba(255,255,255,0.4);
+}
+.title {
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+.count {
+  margin-left: 14px;
+  color: rgba(255,255,255,0.5);
+  font-size: 16px;
+}
+.subtitle {
+  margin-left: auto;
+  color: rgba(255,255,255,0.45);
+  font-size: 14px;
+}
+.comments { flex: 1; margin: 0; padding: 0; list-style: none; overflow: hidden; }
+.comment {
+  display: flex;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  padding: 16px 14px 14px 16px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+  position: relative;
+  overflow: hidden;
+}
+.comment::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 10px; bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,0.08) 100%);
+}
+.avatar {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  margin-right: 12px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #4a4a54, #2a2a34);
+  border: 1.5px solid rgba(255,255,255,0.15);
+}
+.body { flex: 1; min-width: 0; }
+.nick {
+  color: rgba(255,255,255,0.65);
+  font-size: 14px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.content {
+  margin-top: 6px;
+  color: rgba(255,255,255,0.92);
+  font-size: 16px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.like {
+  margin-top: 6px;
+  color: rgba(255,255,255,0.35);
+  font-size: 13px;
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="fake-cover"></div>
+  <div class="fake-title">Rich Love</div>
+  <div class="fake-artist">OneRepublic / Seeb</div>
+  <div class="fake-lyric">And I was saving up</div>
+  <div class="fake-lyric-side">hoping life would forever change</div>
+
+  <div class="comment-panel">
+    <div class="comment-backdrop"></div>
+    <div class="comment-overlay"></div>
+    <div class="comment-stage">
+      <header class="header">
+        <span class="dot"></span>
+        <span class="title">热评</span>
+        <span class="count">2.3w</span>
+        <span class="subtitle">网易云音乐</span>
+      </header>
+      <ul class="comments">
+        <li class="comment">
+          <div class="avatar"></div>
+          <div class="body">
+            <div class="nick">音乐旅人</div>
+            <div class="content">每次听到这首歌都会想起那年夏天，阳光透过树叶洒在脸上的感觉，简单又美好</div>
+            <div class="like">♡ 2.3k</div>
+          </div>
+        </li>
+        <li class="comment">
+          <div class="avatar"></div>
+          <div class="body">
+            <div class="nick">深夜电台</div>
+            <div class="content">OneRepublic的歌总是能在不经意间触动心弦，这首Rich Love更是把那种对生活的热爱表达得淋漓尽致</div>
+            <div class="like">♡ 1.8k</div>
+          </div>
+        </li>
+        <li class="comment">
+          <div class="avatar"></div>
+          <div class="body">
+            <div class="nick">晚风与你</div>
+            <div class="content">单曲循环第三天，根本停不下来</div>
+            <div class="like">♡ 986</div>
+          </div>
+        </li>
+        <li class="comment">
+          <div class="avatar"></div>
+          <div class="body">
+            <div class="nick">Starlight_</div>
+            <div class="content">This song makes me feel alive every single time I hear it. Pure energy and emotion combined perfectly.</div>
+            <div class="like">♡ 654</div>
+          </div>
+        </li>
+        <li class="comment">
+          <div class="avatar"></div>
+          <div class="body">
+            <div class="nick">路过的风景</div>
+            <div class="content">从评论区来的，果然没让我失望，已加入歌单</div>
+            <div class="like">♡ 421</div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>
